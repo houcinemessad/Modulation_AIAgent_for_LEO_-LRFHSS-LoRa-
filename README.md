@@ -3,8 +3,8 @@ Generative AI Agent (LangChain/RAG) optimizing LEO satellite links. It analyzes 
 
 ## Repository structure
 
-- `/src` : Code de l'agent LangChain et logique RAG.
-- `/data` : Le dataset CSV de 1000 scénarios.
-- `/notebooks` : Pour tes analyses exploratoires et visualisations du PER.
-- `/dashboard` : Code de l'interface interactive.
-- `/.github/workflows` : Pour tes scripts CI/CD (GitHub Actions).
+- `/src`: LangChain agent code and RAG logic.
+- `/data`: CSV dataset containing 1000 scenarios.
+- `/notebooks`: Exploratory analysis notebooks and PER visualizations.
+- `/dashboard`: Interactive dashboard application code.
+- `/.github/workflows`: CI/CD workflow scripts (GitHub Actions).
