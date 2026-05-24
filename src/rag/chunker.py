@@ -88,3 +88,85 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
     measured under those exact conditions.
     
     """
+     dataset = pd.read_csv(dataset_path)
+    validate_required_columns(dataset)
+
+    # A "channel state" is fully determined by the satellite geometry
+    # (elevation, relative speed) and the network load (n_nodes). Grouping
+    # on these three columns gives us one group per state, containing
+    # exactly the 8 modulation rows measured under that state.
+    channel_state_columns = ["elevation_deg", "v_rel_kmps", "n_nodes"]
+
+    for (elev, vrel, nodes), modulations_at_state in dataset.groupby(
+        channel_state_columns, sort=True
+    ):
+
+        # Each row of the group is one of the 8 modulations at this state.
+        per_by_modulation = dict(zip(
+            modulations_at_state["modulation"],
+            modulations_at_state["PER_pct"].round(2),
+        ))
+
+        # The four channel descriptors below (distance, kappa, doppler, visibility)
+        # depend ONLY on the channel state, not on the modulation, so they are
+        # identical across the 8 rows of the group. We pick the first row as a
+        # representative — any of the eight would give the same numbers.
+        channel_state_row = modulations_at_state.iloc[0]
+
+        metadata = {
+            # Exact grid coordinates
+            "elevation_deg":     int(elev),
+            "v_rel_kmps":        float(vrel),
+            "n_nodes":           int(nodes),
+
+            # Physical bin labels (classification, not decision)
+            "elevation_bin":     classify_into_bin(elev,  ELEVATION_BINS),
+            "doppler_bin":       classify_into_bin(vrel,  DOPPLER_BINS),
+            "density_bin":       classify_into_bin(nodes, DENSITY_BINS),
+
+            # Physical channel descriptors (single-valued at this channel state)
+            "distance_km":       float(channel_state_row["distance_km"]),
+            "kappa":             float(channel_state_row["kappa"]),
+            "doppler_hz":        float(channel_state_row["doppler_hz"]),
+            "visibility_s":      float(channel_state_row["visibility_window_s"]),
+            "rssi_mean_dbm":     round(float(modulations_at_state["RSSI_dBm"].mean()), 2),
+            "snr_mean_db":       round(float(modulations_at_state["SNR_dB"].mean()),   2),
+
+            # Per-modulation PER, raw measurement, not a decision.
+            # Flat keys so ChromaDB can filter on them: per_DR8 < 20.
+            **{f"per_{mod}": float(per) for mod, per in per_by_modulation.items()},
+        }
+
+        yield {
+            "id":       f"chunk_el{int(elev):02d}_v{vrel:g}_n{int(nodes)}",
+            "metadata": metadata,
+            "rows":     modulations_at_state.to_dict(orient="records"),
+        }
+
+
+# ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+# Main/test code: run this file to see how the dataset gets chunked, and to check the distribution of channel states across the chunks.
+# ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+    from collections import Counter
+
+    dataset_path = sys.argv[1] if len(sys.argv) > 1 else "data/dataset.csv"
+
+    all_chunks = list(chunk_dataset(dataset_path))
+    total_rows = sum(len(chunk["rows"]) for chunk in all_chunks)
+
+    print(f"Built {len(all_chunks)} chunks covering {total_rows} rows "
+          f"({total_rows / len(all_chunks):.1f} modulations/chunk).\n")
+
+    bin_distribution = Counter(
+        (chunk["metadata"]["elevation_bin"], chunk["metadata"]["doppler_bin"])
+        for chunk in all_chunks
+    )
+    print("(elevation_bin, doppler_bin) distribution:")
+    for bin_pair, count in sorted(bin_distribution.items()):
+        print(f"  {bin_pair}: {count}")
+
+
+
