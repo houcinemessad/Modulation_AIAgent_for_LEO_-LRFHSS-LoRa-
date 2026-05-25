@@ -88,7 +88,7 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
     measured under those exact conditions.
     
     """
-     dataset = pd.read_csv(dataset_path)
+    dataset = pd.read_csv(dataset_path)
     validate_required_columns(dataset)
 
     # A "channel state" is fully determined by the satellite geometry
