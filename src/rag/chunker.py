@@ -53,6 +53,7 @@ REQUIRED_COLUMNS = (
     "modulation", "PER_pct",
     "distance_km", "kappa", "doppler_hz", "visibility_window_s",
     "RSSI_dBm", "SNR_dB",
+    "toa_s", "max_packets_in_window"
 )
 
 
@@ -106,12 +107,22 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
             modulations_at_state["modulation"],
             modulations_at_state["PER_pct"].round(2),
         ))
+        toa_by_modulation = dict(zip(
+            modulations_at_state["modulation"],
+            modulations_at_state["toa_s"].round(4),
+        ))
+        max_packets_by_modulation = dict(zip(
+            modulations_at_state["modulation"],
+            modulations_at_state["max_packets_in_window"].astype(int),
+        ))
 
-        # The four channel descriptors below (distance, kappa, doppler, visibility)
+        # Channel descriptors below (distance, kappa, doppler, visibility)
         # depend ONLY on the channel state, not on the modulation, so they are
         # identical across the 8 rows of the group. We pick the first row as a
         # representative — any of the eight would give the same numbers.
         channel_state_row = modulations_at_state.iloc[0]
+        lora_rows   = modulations_at_state[modulations_at_state["modulation"].str.startswith("SF")]
+        lrfhss_rows = modulations_at_state[modulations_at_state["modulation"].str.startswith("DR")]
 
         metadata = {
             # Exact grid coordinates
@@ -128,13 +139,17 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
             "distance_km":       float(channel_state_row["distance_km"]),
             "kappa":             float(channel_state_row["kappa"]),
             "doppler_hz":        float(channel_state_row["doppler_hz"]),
-            "visibility_s":      float(channel_state_row["visibility_window_s"]),
             "rssi_mean_dbm":     round(float(modulations_at_state["RSSI_dBm"].mean()), 2),
-            "snr_mean_db":       round(float(modulations_at_state["SNR_dB"].mean()),   2),
+            "snr_lora_mean_db":  round(float(lora_rows["SNR_dB"].mean()),   2),
+            "snr_lrfhss_mean_db":round(float(lrfhss_rows["SNR_dB"].mean()), 2),
+            "visibility_s":      float(channel_state_row["visibility_window_s"]),
+
 
             # Per-modulation PER, raw measurement, not a decision.
             # Flat keys so ChromaDB can filter on them: per_DR8 < 20.
-            **{f"per_{mod}": float(per) for mod, per in per_by_modulation.items()},
+            **{f"per_{mod}":         float(per) for mod, per in per_by_modulation.items()},
+            **{f"toa_{mod}":         float(toa) for mod, toa in toa_by_modulation.items()},
+            **{f"max_packets_{mod}": int(n)     for mod, n   in max_packets_by_modulation.items()},
         }
 
         yield {
@@ -149,10 +164,13 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
 # ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
     from collections import Counter
-
-    dataset_path = sys.argv[1] if len(sys.argv) > 1 else "data/dataset.csv"
+    dataset_path = "data/dataset.csv" 
+    try:
+        all_chunks = list(chunk_dataset(dataset_path))
+    except FileNotFoundError:
+        dataset_path = input("Enter the path to the dataset CSV file: ").strip()
+        all_chunks = list(chunk_dataset(dataset_path))
 
     all_chunks = list(chunk_dataset(dataset_path))
     total_rows = sum(len(chunk["rows"]) for chunk in all_chunks)
@@ -161,12 +179,9 @@ if __name__ == "__main__":
           f"({total_rows / len(all_chunks):.1f} modulations/chunk).\n")
 
     bin_distribution = Counter(
-        (chunk["metadata"]["elevation_bin"], chunk["metadata"]["doppler_bin"])
+        (chunk["metadata"]["elevation_bin"], chunk["metadata"]["doppler_bin"], chunk["metadata"]["density_bin"])
         for chunk in all_chunks
     )
-    print("(elevation_bin, doppler_bin) distribution:")
+    print("(elevation_bin, doppler_bin, density_bin) distribution:")
     for bin_pair, count in sorted(bin_distribution.items()):
         print(f"  {bin_pair}: {count}")
-
-
-

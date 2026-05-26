@@ -1,3 +1,10 @@
+from __future__ import annotations
+from chunker import chunk_dataset, ELEVATION_BINS, DOPPLER_BINS, DENSITY_BINS, classify_into_bin
+from langchain_ollama import OllamaEmbeddings
+import math
+from typing import Iterable
+import pandas as pd
+
 """
 Provides hybrid embedding methods for texts.
 Architecture idea is based on :
@@ -7,11 +14,6 @@ Architecture idea is based on :
 - LangChain, ollama documentation and other » 
 
 """
-from chunker import chunk_dataset, ELEVATION_BINS, DOPPLER_BINS, DENSITY_BINS, classify_into_bin
-from langchain_ollama import OllamaEmbeddings
-from __future__ import annotations
-import math
-from typing import Iterable
 
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
@@ -115,4 +117,25 @@ class Embedder:
     that the metadata is encoded in a way that preserves its physical meaning.
     """
 
-    
+    def prepare_chunks_for_indexing(self, chunks):
+        agent_texts = [agent_text_for_indexing(c) for c in chunks]
+        llm_texts   = [llm_text_for_context(c)    for c in chunks]
+        return agent_texts, llm_texts
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embeddings.embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embeddings.embed_query(text)
+
+# Main/test code: run this file to see how the dataset gets chunked, and to check the distribution of channel states across the chunks.
+
+if __name__ == "__main__":
+    dataset_path = "data/dataset.csv" 
+    dataset = pd.read_csv(dataset_path)
+    for chunk in chunk_dataset(dataset):
+        print("Chunk ID:", chunk["id"])
+        print("Metadata:", chunk["metadata"])
+        print("Agent text for indexing:", agent_text_for_indexing(chunk))
+        print("LLM text for context:", llm_text_for_context(chunk))
+        print("-" * 80)
