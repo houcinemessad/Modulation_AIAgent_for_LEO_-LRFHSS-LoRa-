@@ -11,13 +11,13 @@ ELEVATION_BINS = [
     (0.0,  15.0, "extreme_low"),
     (15.0, 30.0, "low"),
     (30.0, 60.0, "mid"),
-    (60.0, 90.0, "high"),
+    (60.0, 91.0, "high"),
 ]
 
 DOPPLER_BINS = [
     (0.0,  2.0,  "low"),
-    (2.0,  7.8,  "mid"),
-    (7.8,  16.0, "extreme"),
+    (2.0,  5,  "mid"),
+    (5,  7.6, "extreme"),
 ]
 
 DENSITY_BINS = [
@@ -48,10 +48,14 @@ def classify_into_bin(value, bins):
 
 # Columns the chunker actually reads from the CSV. Anything beyond this is copied verbatim into `rows` but never inspected.
 #If you dont want to change your columns you can just add the new ones to the list and it will work fine, but if you want to remove some of the columns you have to make sure that they are not in this list, otherwise the chunker will raise an error.
+
+"real data set from bimodal simulator are : elevation_deg;mode;sf;N;tx_time_s;toa_s;channel;elevation_deg;distance_km;visibility_window_s;relative_velocity_ms;fspl_db;clutter_db;rician_k;fading_db;shadow_db;rssi_dbm;rx_power_dbm;snr_db;collision;n_colliders;doppler_lost;doppler_static_lost;doppler_dynamic_lost;doppler_joint_lost;doppler_shift_hz;doppler_rate_hz_s;carrier_change_hz;PS_success;headers_rx;fragments_rx;total_fragments;required_fragments;element_collision_rate;n_elements;n_headers;n_fragments;n_collided_headers;n_collided_fragments;success;doppler_snr_penalty_db"
+"In the future an adapter who convert the column names to the ones expected by the chunker could be implemented, but for now the dataset has to have the exact columns expected by the chunker"
+
 REQUIRED_COLUMNS = (
-    "elevation_deg", "v_rel_kmps", "n_nodes",
-    "modulation", "PER_pct",
-    "distance_km", "kappa", "doppler_hz", "visibility_window_s",
+    "elevation_deg", "v_rel_kmps", "N",
+    "mode", "PER_pct",
+    "distance_km", "kappa", "doppler_hz", "doppler_rate_hz", "visibility_window_s",
     "RSSI_dBm", "SNR_dB",
     "toa_s", "max_packets_in_window"
 )
@@ -66,6 +70,8 @@ def validate_required_columns(dataset: pd.DataFrame) -> None:
     malformed downstream — we prefer to crash here with a clear message
     than to let a broken vector store be built silently.
     """
+    "real data set : elevation_deg;mode;sf;N;packet_id;node_id;tx_time_s;toa_s;channel;elevation_deg;pass_time_s;distance_km;visibility_window_s;orbital_velocity_ms;relative_velocity_ms;fspl_db;clutter_db;rician_k;fading_db;shadow_db;rssi_dbm;rx_power_dbm;noise_dbm;snr_db;collision;n_colliders;doppler_lost;doppler_static_lost;doppler_dynamic_lost;doppler_joint_lost;doppler_shift_hz;doppler_rate_hz_s;carrier_change_hz;PS_success;headers_rx;fragments_rx;total_fragments;required_fragments;element_collision_rate;n_elements;n_headers;n_fragments;n_collided_headers;n_collided_fragments;success;doppler_snr_penalty_db"
+    
     missing = [column for column in REQUIRED_COLUMNS if column not in dataset.columns]
     if missing:
         raise KeyError(
@@ -104,15 +110,15 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
 
         # Each row of the group is one of the 8 modulations at this state.
         per_by_modulation = dict(zip(
-            modulations_at_state["modulation"],
+            modulations_at_state["mode"],
             modulations_at_state["PER_pct"].round(2),
         ))
         toa_by_modulation = dict(zip(
-            modulations_at_state["modulation"],
+            modulations_at_state["mode"],
             modulations_at_state["toa_s"].round(4),
         ))
         max_packets_by_modulation = dict(zip(
-            modulations_at_state["modulation"],
+            modulations_at_state["mode"],
             modulations_at_state["max_packets_in_window"].astype(int),
         ))
 
@@ -121,8 +127,9 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
         # identical across the 8 rows of the group. We pick the first row as a
         # representative — any of the eight would give the same numbers.
         channel_state_row = modulations_at_state.iloc[0]
-        lora_rows   = modulations_at_state[modulations_at_state["modulation"].str.startswith("SF")]
-        lrfhss_rows = modulations_at_state[modulations_at_state["modulation"].str.startswith("DR")]
+        lora_rows   = modulations_at_state[modulations_at_state["mode"].str.startswith("SF")]
+        lrfhss_rows = modulations_at_state[modulations_at_state["mode"].str.startswith("DR")]
+#############################################################mode###############################
 
         metadata = {
             # Exact grid coordinates
@@ -139,11 +146,11 @@ def chunk_dataset(dataset_path: str) -> Iterator[dict]:
             "distance_km":       float(channel_state_row["distance_km"]),
             "kappa":             float(channel_state_row["kappa"]),
             "doppler_hz":        float(channel_state_row["doppler_hz"]),
+            "doppler_rate_hz":   float(channel_state_row["doppler_rate_hz"]),
             "rssi_mean_dbm":     round(float(modulations_at_state["RSSI_dBm"].mean()), 2),
             "snr_lora_mean_db":  round(float(lora_rows["SNR_dB"].mean()),   2),
             "snr_lrfhss_mean_db":round(float(lrfhss_rows["SNR_dB"].mean()), 2),
             "visibility_s":      float(channel_state_row["visibility_window_s"]),
-
 
             # Per-modulation PER, raw measurement, not a decision.
             # Flat keys so ChromaDB can filter on them: per_DR8 < 20.
