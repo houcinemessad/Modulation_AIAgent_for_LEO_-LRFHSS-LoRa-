@@ -1,0 +1,24 @@
+# =====================================================================
+# Modulation AI Agent for LEO (LR-FHSS / LoRa) — Python dependencies
+# Install everything with:   pip install -r requirements.txt
+# Tested on Python 3.12.
+# =====================================================================
+
+# ── Core data + simulation ──────────────────────────────────────────
+pandas>=2.0            # dataset I/O, chunker grouping, adapter aggregation
+numpy>=1.24            # link-budget math, vectors
+scipy>=1.10            # data/simulateurmath.py -> scipy.special.comb (LR-FHSS collision model)
+
+# ── RAG: embeddings + vector store ──────────────────────────────────
+chromadb>=0.5          # persistent vector store (src/rag/vectorstore.py)
+langchain-ollama>=0.2  # OllamaEmbeddings (embedder.py) AND ChatOllama (the LLM judge)
+
+# ── LLM orchestration: the 3-prompt pipeline / agent ────────────────
+langchain>=0.3         # chains / runnables for the pipeline
+langchain-core>=0.3    # prompt templates, base runnables (pulled by langchain, pinned for clarity)
+
+# ── Validation plots (notebooks/) ───────────────────────────────────
+matplotlib>=3.7        # literature-comparison figures (validate_against_literature.py)
+
+# ── Tests ───────────────────────────────────────────────────────────
+pytest>=7.4            # tests/test_simulator.py (also runs as a plain script)
