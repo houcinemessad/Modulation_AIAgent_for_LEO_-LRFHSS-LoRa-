@@ -20,15 +20,22 @@ def ask_llm(prompt_text):
 
 def decide(state): #state sont les métadonnés de la requête, a lier sur le dashboard.
     """Réponse du llm"""
+    elev = str(state["elevation_deg"])
+    dopp = str(round(state["doppler_hz"] / 1000))   # Hz -> kHz
+    rx   = str(round(state["rssi_mean_dbm"]))
+
     # 1. Geometry  analisis, severity estimation 
-    sev = ask_llm(prompts.geometry_analysis_prompt_zeroshot())
+    sev = ask_llm(prompts.geometry_analysis_prompt_zeroshot().replace("{ELEVATION}", elev).replace("{DOPPLER}", dopp).replace("{RX_POWER}", rx))
 
     # 2. RAG for PER prediction
     hits = store.search(embedder.embed_query(agent_text_for_query(state)), k=3)
-    per  = ask_llm(prompts.per_prediction_via_embedding_prompt_fewshot())
+    per  = ask_llm(prompts.per_prediction_via_embedding_prompt_fewshot().replace("{SEVERITY}", str(sev))
+          .replace("{ELEVATION}", elev)
+          .replace("{DOPPLER}", dopp).replace("{RX_POWER}", rx)
+          .replace("{RAG_CONTEXT}", {'RAG_CONTEXT'}))
 
     # 3. final decision
-    return ask_llm(prompts.final_decision_prompt_zeroshot())
+    return ask_llm(prompts.final_decision_prompt_zeroshot().replace("{ELEVATION}", elev).replace("{PREDICTED_PER_JSON}", json.dumps(per)))
 
 if __name__ == "__main__":
     # Exemple de requête
