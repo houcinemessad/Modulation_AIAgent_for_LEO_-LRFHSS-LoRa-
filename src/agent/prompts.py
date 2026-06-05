@@ -5,9 +5,9 @@ import json
 #########################
 
 def geometry_analysis_prompt_zeroshot():
-#Etape 1 : prompt qui analysera la géométrie LEO (EL, Doppler, Rx_power)  
+#Etape 1 : prompt qui analysera la géométrie LEO (EL, Doppler, Rx_power)
 #Etape 2 : classer la sévérité du canal selon une échelle 1-5 via un second paragraphe du prompt
-#Sortie en JSON 
+#Sortie en JSON
     return """[INST] You are an embedded NTN LoRa-Satellite channel analyzer.
 Evaluate the 3 input metrics and output a JSON object classifying the radio channel severity from 1 (Excellent) to 5 (Critical).
 
@@ -19,16 +19,16 @@ INPUT METRICS:
 CRITICAL RULES:
 1. Max Severity (5) applies immediately if ANY of these conditions are met:
    - ELEVATION < 15
-   - ABS(DOPPLER) > 40
-   - RX_POWER <= -120
+   - ABS(DOPPLER) > 18
+   - RX_POWER <= -128
 2. Min Severity (1) applies only if ALL of these conditions are met:
-   - ELEVATION >= 45
-   - ABS(DOPPLER) < 10
-   - RX_POWER >= -90
+   - ELEVATION >= 60
+   - ABS(DOPPLER) < 6
+   - RX_POWER >= -120
 3. Scale severity from 2 to 4 for intermediate values.
 
 OUTPUT FORMAT:
-Return ONLY a valid JSON object. No markdown code blocks, no preamble, no explanations. 
+Return ONLY a valid JSON object. No markdown code blocks, no preamble, no explanations.
 Follow this exact structure:
 {
   "elevation_status": "critical" or "nominal",
@@ -57,36 +57,27 @@ INPUT METRICS:
 CRITICAL RULES:
 1. Max Severity (5) applies immediately if ANY of these conditions are met:
    - ELEVATION < 15
-   - ABS(DOPPLER) > 40
-   - RX_POWER <= -120
+   - ABS(DOPPLER) > 18
+   - RX_POWER <= -128
 2. Min Severity (1) applies only if ALL of these conditions are met:
-   - ELEVATION >= 45
-   - ABS(DOPPLER) < 10
-   - RX_POWER >= -90
+   - ELEVATION >= 60
+   - ABS(DOPPLER) < 6
+   - RX_POWER >= -120
 3. Scale severity from 2 to 4 for intermediate values.
 
 EXAMPLES OF EXPECTED OUTPUTS (FEW-SHOT):
 
-Example 1 (Critical Case - Severity 5):
-Input: ELEVATION = 11, DOPPLER = 12, RX_POWER = -95
+Example 1 (Low elevation - Severity 5):
+Input: ELEVATION = 11, DOPPLER = 20, RX_POWER = -131
 Output: {
   "elevation_status": "critical",
-  "doppler_status": "nominal",
-  "rx_status": "nominal",
+  "doppler_status": "critical",
+  "rx_status": "critical",
   "severity": 5
 }
 
-Example 2 (Nominal Case - Severity 1):
-Input: ELEVATION = 52, DOPPLER = 4, RX_POWER = -85
-Output: {
-  "elevation_status": "nominal",
-  "doppler_status": "nominal",
-  "rx_status": "nominal",
-  "severity": 1
-}
-
-Example 3 (Intermediate Case - Severity 3):
-Input: ELEVATION = 30, DOPPLER = 22, RX_POWER = -105
+Example 2 (Intermediate - Severity 3):
+Input: ELEVATION = 45, DOPPLER = 14, RX_POWER = -122
 Output: {
   "elevation_status": "nominal",
   "doppler_status": "nominal",
@@ -94,8 +85,17 @@ Output: {
   "severity": 3
 }
 
+Example 3 (Excellent link - Severity 1):
+Input: ELEVATION = 89, DOPPLER = 0, RX_POWER = -119
+Output: {
+  "elevation_status": "nominal",
+  "doppler_status": "nominal",
+  "rx_status": "nominal",
+  "severity": 1
+}
+
 OUTPUT FORMAT:
-Return ONLY a valid JSON object. No markdown code blocks, no preamble, no explanations. 
+Return ONLY a valid JSON object. No markdown code blocks, no preamble, no explanations.
 Follow this exact structure:
 {
   "elevation_status": "critical" or "nominal",
@@ -108,7 +108,7 @@ Follow this exact structure:
 """
 
 def geometry_analysis_prompt_COT():
-#Etape 1 : prompt qui analysera la géométrie LEO (EL, Doppler, Rx_power)  
+#Etape 1 : prompt qui analysera la géométrie LEO (EL, Doppler, Rx_power)
 #Etape 2 : classer la sévérité du canal selon une échelle 1-5 via un second paragraphe du prompt + instruction "raisonne étape par étape avant de conclure"
 #Sortie en JSON
     return """[INST] You are an embedded NTN LoRa-Satellite channel analyzer.
@@ -122,16 +122,16 @@ INPUT METRICS:
 CRITICAL RULES:
 1. Max Severity (5) applies immediately if ANY of these conditions are met:
    - ELEVATION < 15
-   - ABS(DOPPLER) > 40
-   - RX_POWER <= -120
+   - ABS(DOPPLER) > 18
+   - RX_POWER <= -128
 2. Min Severity (1) applies only if ALL of these conditions are met:
-   - ELEVATION >= 45
-   - ABS(DOPPLER) < 10
-   - RX_POWER >= -90
+   - ELEVATION >= 60
+   - ABS(DOPPLER) < 6
+   - RX_POWER >= -120
 3. Scale severity from 2 to 4 for intermediate values.
 
 OUTPUT FORMAT:
-Return ONLY a valid JSON object. No markdown code blocks, no preamble, no explanations. 
+Return ONLY a valid JSON object. No markdown code blocks, no preamble, no explanations.
 Follow this exact structure:
 {
   "elevation_status": "critical" or "nominal",
@@ -206,37 +206,37 @@ PREDICTION RULES:
 EXAMPLES OF EXPECTED OUTPUTS (FEW-SHOT):
 
 Example 1:
-Input Metrics: SEVERITY = 3, ELEVATION = 25, DOPPLER = 15, RX_POWER = -100
+Input Metrics: SEVERITY = 5, ELEVATION = 25, DOPPLER = 19, RX_POWER = -126
 RAG Context:
-SIM 1: SEV:3, ELEV:22, DOPPLER:12, RX:-102, SF7_PER:15%, SF8_PER:10%, SF9_PER:5%, SF10_PER:2%, SF11_PER:1%, SF12_PER:0%, DR8_PER:2%, DR9_PER:4%
-SIM 2: SEV:4, ELEV:16, DOPPLER:25, RX:-112, SF7_PER:85%, SF8_PER:60%, SF9_PER:40%, SF10_PER:20%, SF11_PER:10%, SF12_PER:5%, DR8_PER:8%, DR9_PER:12%
-SIM 3: SEV:5, ELEV:11, DOPPLER:42, RX:-122, SF7_PER:100%, SF8_PER:100%, SF9_PER:95%, SF10_PER:80%, SF11_PER:60%, SF12_PER:35%, DR8_PER:15%, DR9_PER:25%
+SIM 1: ELEV:22, DOPPLER:19, RX:-127, SF7_PER:78%, SF8_PER:61%, SF9_PER:65%, SF10_PER:85%, SF11_PER:96%, SF12_PER:100%, DR8_PER:2%, DR9_PER:5%
+SIM 2: ELEV:16, DOPPLER:20, RX:-129, SF7_PER:89%, SF8_PER:75%, SF9_PER:72%, SF10_PER:85%, SF11_PER:96%, SF12_PER:100%, DR8_PER:2%, DR9_PER:5%
+SIM 3: ELEV:45, DOPPLER:14, RX:-122, SF7_PER:34%, SF8_PER:43%, SF9_PER:59%, SF10_PER:87%, SF11_PER:98%, SF12_PER:100%, DR8_PER:2%, DR9_PER:7%
 Output: {
-  "per_sf7": 12,
-  "per_sf8": 8,
-  "per_sf9": 4,
-  "per_sf10": 1,
-  "per_sf11": 0,
-  "per_sf12": 0,
+  "per_sf7": 70,
+  "per_sf8": 57,
+  "per_sf9": 65,
+  "per_sf10": 83,
+  "per_sf11": 97,
+  "per_sf12": 100,
   "per_dr8": 1,
-  "per_dr9": 3
+  "per_dr9": 6
 }
 
 Example 2:
-Input Metrics: SEVERITY = 4, ELEVATION = 14, DOPPLER = 30, RX_POWER = -115
+Input Metrics: SEVERITY = 5, ELEVATION = 11, DOPPLER = 20, RX_POWER = -131
 RAG Context:
-SIM 1: SEV:3, ELEV:22, DOPPLER:12, RX:-102, SF7_PER:15%, SF8_PER:10%, SF9_PER:5%, SF10_PER:2%, SF11_PER:1%, SF12_PER:0%, DR8_PER:2%, DR9_PER:4%
-SIM 2: SEV:4, ELEV:16, DOPPLER:25, RX:-112, SF7_PER:85%, SF8_PER:60%, SF9_PER:40%, SF10_PER:20%, SF11_PER:10%, SF12_PER:5%, DR8_PER:8%, DR9_PER:12%
-SIM 3: SEV:5, ELEV:11, DOPPLER:42, RX:-122, SF7_PER:100%, SF8_PER:100%, SF9_PER:95%, SF10_PER:80%, SF11_PER:60%, SF12_PER:35%, DR8_PER:15%, DR9_PER:25%
+SIM 1: ELEV:16, DOPPLER:20, RX:-129, SF7_PER:89%, SF8_PER:68%, SF9_PER:56%, SF10_PER:65%, SF11_PER:82%, SF12_PER:93%, DR8_PER:0%, DR9_PER:1%
+SIM 2: ELEV:22, DOPPLER:19, RX:-127, SF7_PER:74%, SF8_PER:49%, SF9_PER:48%, SF10_PER:60%, SF11_PER:84%, SF12_PER:94%, DR8_PER:0%, DR9_PER:1%
+SIM 3: ELEV:25, DOPPLER:19, RX:-126, SF7_PER:64%, SF8_PER:46%, SF9_PER:43%, SF10_PER:60%, SF11_PER:83%, SF12_PER:95%, DR8_PER:0%, DR9_PER:2%
 Output: {
-  "per_sf7": 92,
-  "per_sf8": 78,
-  "per_sf9": 65,
-  "per_sf10": 47,
-  "per_sf11": 32,
-  "per_sf12": 18,
-  "per_dr8": 11,
-  "per_dr9": 18
+  "per_sf7": 94,
+  "per_sf8": 81,
+  "per_sf9": 68,
+  "per_sf10": 69,
+  "per_sf11": 82,
+  "per_sf12": 94,
+  "per_dr8": 0,
+  "per_dr9": 2
 }
 
 OUTPUT FORMAT:
@@ -356,22 +356,22 @@ DECISION LOGIC RULES:
 
 EXAMPLES OF EXPECTED OUTPUTS (FEW-SHOT):
 
-Example 1 (Hard Safety Rule Triggered):
-Input Elevation: ELEVATION = 12
+Example 1 (Hard Safety Rule Triggered - ELEVATION < 15):
+Input Elevation: ELEVATION = 11
 Input JSON: {
-  "per_sf7": 45, "per_sf8": 30, "per_sf9": 15, "per_sf10": 8, "per_sf11": 4, "per_sf12": 2, "per_dr8": 5, "per_dr9": 10
+  "per_sf7": 95, "per_sf8": 84, "per_sf9": 77, "per_sf10": 84, "per_sf11": 96, "per_sf12": 99, "per_dr8": 2, "per_dr9": 5
 }
 Output: {
   "selected_command": "AT+MOD=LR-FHSS-DR8"
 }
 
 Example 2 (Nominal Case - Lowest PER Selection):
-Input Elevation: ELEVATION = 22
+Input Elevation: ELEVATION = 89
 Input JSON: {
-  "per_sf7": 25, "per_sf8": 18, "per_sf9": 12, "per_sf10": 6, "per_sf11": 3, "per_sf12": 1, "per_dr8": 2, "per_dr9": 4
+  "per_sf7": 28, "per_sf8": 37, "per_sf9": 65, "per_sf10": 100, "per_sf11": 98, "per_sf12": 100, "per_dr8": 2, "per_dr9": 5
 }
 Output: {
-  "selected_command": "AT+MOD=LORA-SF12"
+  "selected_command": "AT+MOD=LR-FHSS-DR8"
 }
 
 OUTPUT FORMAT:
