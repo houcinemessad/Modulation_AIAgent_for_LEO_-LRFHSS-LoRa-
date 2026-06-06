@@ -1,13 +1,13 @@
-"""Contient les trois prompts spécialisés de l'agent."""
+"""Contains the agent's three specialized prompts."""
 import json
 #########################
-#Document en anglais svp#
+# Please keep this file in English
 #########################
 
 def geometry_analysis_prompt_zeroshot():
-#Etape 1 : prompt qui analysera la géométrie LEO (EL, Doppler, Rx_power)
-#Etape 2 : classer la sévérité du canal selon une échelle 1-5 via un second paragraphe du prompt
-#Sortie en JSON
+  # Step 1: prompt that will analyze LEO geometry (EL, Doppler, Rx_power)
+  # Step 2: classify channel severity on a 1-5 scale via a second paragraph in the prompt
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite channel analyzer.
 Evaluate the 3 input metrics and output a JSON object classifying the radio channel severity from 1 (Excellent) to 5 (Critical).
 
@@ -42,10 +42,10 @@ Follow this exact structure:
 """
 
 def geometry_analysis_prompt_fewshot():
-#Etape 1 : prompt qui analysera la géométrie LEO (EL, Doppler, Rx_power) + 2-3 exemples concrets injectés
-#Etape 2 : classer la sévérité du canal selon une échelle 1-5 via un second paragraphe du prompt + 2-3 exemples concrets injectés
-#ex : "élévation 12°, Doppler 18kHz → sévérité 5"
-#Sortie en JSON
+  # Step 1: prompt that will analyze LEO geometry (EL, Doppler, Rx_power) + 2-3 injected examples
+  # Step 2: classify channel severity on a 1-5 scale via a second paragraph in the prompt + examples
+  # e.g.: "elevation 12°, Doppler 18kHz → severity 5"
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite channel analyzer.
 Evaluate the 3 input metrics and output a JSON object classifying the radio channel severity from 1 (Excellent) to 5 (Critical).
 
@@ -108,9 +108,9 @@ Follow this exact structure:
 """
 
 def geometry_analysis_prompt_COT():
-#Etape 1 : prompt qui analysera la géométrie LEO (EL, Doppler, Rx_power)
-#Etape 2 : classer la sévérité du canal selon une échelle 1-5 via un second paragraphe du prompt + instruction "raisonne étape par étape avant de conclure"
-#Sortie en JSON
+  # Step 1: prompt that will analyze LEO geometry (EL, Doppler, Rx_power)
+  # Step 2: classify channel severity on a 1-5 scale and include instruction to "think step-by-step before concluding"
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite channel analyzer.
 Evaluate the 3 input metrics and output a JSON object classifying the radio channel severity from 1 (Excellent) to 5 (Critical).
 
@@ -145,8 +145,8 @@ Follow this exact structure:
 """
 
 def per_prediction_via_embedding_prompt_zeroshot():
-#prompt qui demande l'algorithme knn via les embeddings pour évaluer le PER de chaque modulation
-#Sortie en JSON
+  # Prompt requesting a KNN-like comparison via embeddings to estimate PER for each modulation
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite performance predictor.
 Estimate the exact Packet Error Rate (PER) as an INTEGER (0 to 100) for 8 specific modulations based on current real-time metrics and 3 historical reference simulations.
 
@@ -182,9 +182,9 @@ Follow this exact structure:
 {
 """
 def per_prediction_via_embedding_prompt_fewshot():
-#prompt qui demande l'algorithme knn via les embeddings pour évaluer le PER de chaque modulation avec qlq exemples de résultats
-#ex : SNR et Linkbudget de exemple 1
-#Sortie en JSON
+  # Prompt requesting a KNN-like comparison via embeddings to estimate PER for each modulation with example results
+  # e.g.: example SNR and link budget
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite performance predictor.
 Estimate the exact Packet Error Rate (PER) as an INTEGER (0 to 100) for 8 specific modulations based on current real-time metrics and 3 historical reference simulations.
 
@@ -257,9 +257,9 @@ Follow this exact structure:
 """
 
 def per_prediction_via_embedding_prompt_COT():
-#prompt qui demande l'algorithme knn via les embeddings pour évaluer le PER de chaque modulation avec raisonnement contextualisé
-#ex : prompt + instructions de raisonnement sur les données chromaDB
-#Sortie en JSON
+  # Prompt requesting a KNN-like comparison via embeddings to estimate PER for each modulation with contextualized reasoning
+  # e.g.: prompt + reasoning instructions about the ChromaDB data
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite performance predictor.
 Estimate the exact Packet Error Rate (PER) as an INTEGER (0 to 100) for 8 specific modulations based on current real-time metrics and 3 historical reference simulations.
 
@@ -297,8 +297,8 @@ Follow this exact structure:
 """
 
 def final_decision_prompt_zeroshot():
-#prompt qui génère la décision de choix de modulation, et indique les cas de basculement si l'élevation ou la vitesse orbitale change par exemple
-#Sortie en JSON
+  # Prompt that generates the modulation selection decision and indicates fallback cases if elevation or orbital velocity changes
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite modem controller.
 Select the optimal modulation command based on real-time ELEVATION and PREDICTED_PER_JSON values.
 
@@ -331,8 +331,8 @@ Follow this exact structure:
 """
 
 def final_decision_prompt_fewshot():
-#prompt qui génère la décision de choix de modulation, et indique les cas de basculement si l'élevation ou la vitesse orbitale change par exemple + Exemple de choix de modulation selon le cas ex1 et ex2
-#Sortie en JSON
+  # Prompt that generates the modulation selection decision and indicates fallback cases if elevation or orbital velocity changes + examples
+  # Output in JSON
     return """ [INST] You are an embedded NTN LoRa-Satellite modem controller.
 Select the optimal modulation command based on real-time ELEVATION and PREDICTED_PER_JSON values.
 
@@ -385,8 +385,8 @@ Follow this exact structure:
 """
 
 def final_decision_prompt_COT():
-#prompt qui génère la décision de choix de modulation, et indique les cas de basculement si l'élevation ou la vitesse orbitale change par exemple en raisonnant sur les conditions précédentes
-#Sortie en JSON
+  # Prompt that generates the modulation selection decision and indicates fallback cases if elevation or orbital velocity changes while reasoning over previous conditions
+  # Output in JSON
     return """[INST] You are an embedded NTN LoRa-Satellite modem controller.
 Select the optimal modulation command based on real-time ELEVATION and PREDICTED_PER_JSON values.
 

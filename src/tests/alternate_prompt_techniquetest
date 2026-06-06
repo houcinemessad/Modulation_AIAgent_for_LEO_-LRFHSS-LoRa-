@@ -1,0 +1,40 @@
+"""alternate_technique.py 
+
+3 étages (géométrie->sévérité, prédiction PER, décision) × 3 stratégies
+(zero_shot, few_shot, cot) = 3^3 = 27 combinaisons. Pour chaque combinaison et
+chaque scénario de test, on mesure :
+  - temps de réponse (latence ms)
+  - PER prédit (LLM) vs PER réel (dataset)  -> MAE sur les 8 modulations
+  - modulation choisie vs oracle (= min PER réel) -> match, regret, gain vs SF12 fixe
+  - sévérité donnée (LLM) vs sévérité de référence (règles déterministes du prompt)
+  - validité de la commande (détection d'hallucination)
+
+"""
+import os
+import sys
+import csv
+import statistics
+from itertools import product
+
+# Racine du repo sur le path (ce fichier est dans src/tests/, donc DEUX crans au-dessus),
+# sinon "from src.agent import agent" échoue selon le répertoire de lancement.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from src.agent import agent
+
+# ── Paramètres ───────────────────────────────────────────────────────
+TECHNIQUES = ["zero_shot", "few_shot", "cot"]          # ZS, FS, COT
+MODS = ("sf7", "sf8", "sf9", "sf10", "sf11", "sf12", "dr8", "dr9")
+
+# Quelques scénarios (élévation, v_rel km/s, n_nodes), un par régime, pour comparer à l'oracle.
+SCENARIOS = [
+    (10,  7.0, 100_000),   # basse élév, dense    -> DR8 attendu
+    (45,  5.0,  50_000),   # mid
+    (60,  2.0,  10_000),   # haute, peu dense     -> LoRa devrait gagner
+    (80,  1.5, 100_000),   # culmination, dense   -> SF longs tués (Doppler-rate)
+]
+
+DETAILED_CSV = "data/metrics_techniques_detailed.csv"
+SUMMARY_CSV  = "data/metrics_techniques_summary.csv"
+
+
+
