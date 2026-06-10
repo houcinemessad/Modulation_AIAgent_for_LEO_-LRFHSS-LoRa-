@@ -25,8 +25,8 @@ _DATASET_CSV = os.path.abspath(
 
 # STANDARD radio constants (for SNR calculation; NOT the simulator)
 _NF_DB   = 6.0          # receiver noise figure (dB)
-_BW_LORA = 125_000.0    # bande LoRa (Hz)
-_BW_FHSS = 488.0        # bande d'un fragment LR-FHSS (Hz)
+_BW_LORA = 125_000.0    # LoRa band (Hz)
+_BW_FHSS = 488.0        # LR-FHSS fragment band (Hz)
 
 MODS = ("sf7", "sf8", "sf9", "sf10", "sf11", "sf12", "dr8", "dr9")
 
@@ -41,8 +41,7 @@ def startup(dataset_path=_DATASET_CSV, force_rebuild=False):
     """Index chunks into ChromaDB (data/chroma) — call ONCE at startup.
     Reuses the pipeline's store/embedder (the SAME index that execute will read later).
     index_chunks skips if already populated; set force_rebuild=True to rebuild (new dataset)."""
-    _PIPELINE.store.index_chunks(list(chunk_dataset(dataset_path)), _PIPELINE.embedder,
-                                 force_rebuild=force_rebuild)
+    _PIPELINE.store.index_chunks(list(chunk_dataset(dataset_path)), _PIPELINE.embedder, force_rebuild=force_rebuild)
 
 
 def _noise_floor_dbm(bw_hz):
@@ -55,23 +54,30 @@ def build_state(elevation_deg, v_rel_kmps, n_nodes):
     distance / kappa / Doppler / RSSI = METADATA read from the dataset (row whose
     elevation THEN v_rel are the closest, at fixed density).
     """
-    density_subset = _DATASET[_DATASET["n_nodes"] == n_nodes]
-    # nearest elevation first, THEN nearest v_rel at that elevation.
-    # v_rel is a real axis: it fixes the Doppler/RSSI read from the metadata.
-    nearest_elev = density_subset.loc[(density_subset["elevation_deg"] - elevation_deg).abs().idxmin(), "elevation_deg"]
-    rows_at_elev = density_subset[density_subset["elevation_deg"] == nearest_elev]
-    nearest_row  = rows_at_elev.loc[(rows_at_elev["v_rel_kmps"] - v_rel_kmps).abs().idxmin()]
-    rssi = float(nearest_row["RSSI_dBm"])
+    df = _DATASET
+    sub = df[df["n_nodes"] == n_nodes]
+    if sub.empty:
+        sub = df
+    # closest elevation, THEN closest v_rel at this elevation.
+    # v_rel is a real axis: it sets Doppler/RSSI read as metadata.
+    e_near = sub.loc[(sub["elevation_deg"] - elevation_deg).abs().idxmin(), "elevation_deg"]
+    cand   = sub[sub["elevation_deg"] == e_near]
+    row    = cand.loc[(cand["v_rel_kmps"] - v_rel_kmps).abs().idxmin()]
+    grp    = cand[cand["v_rel_kmps"] == row["v_rel_kmps"]]   # the 8 modulations for this state
+    max_packets = {m.lower(): int(p)                          # deterministic throughput (packets/window)
+                   for m, p in zip(grp["modulation"], grp["max_packets_in_window"])}
+    rssi = float(row["RSSI_dBm"])
     return {
         "elevation_deg": int(elevation_deg),
         "v_rel_kmps":    float(v_rel_kmps),
         "n_nodes":       int(n_nodes),
-        "distance_km":   float(nearest_row["distance_km"]),   # metadata (dataset)
-        "kappa":         float(nearest_row["kappa"]),         # metadata (rice, dataset)
-        "doppler_hz":    float(nearest_row["doppler_hz"]),    # metadata (dataset) — consistent
-        "rssi_mean_dbm": rssi,                                # metadata (dataset)
+        "distance_km":   float(row["distance_km"]),     # metadata (dataset)
+        "kappa":         float(row["kappa"]),           # metadata (rice, dataset)
+        "doppler_hz":    float(row["doppler_hz"]),      # metadata (dataset) - consistent
+        "rssi_mean_dbm": rssi,                          # metadata (dataset)
         "snr_lora_db":   rssi - _noise_floor_dbm(_BW_LORA),
         "snr_lrfhss_db": rssi - _noise_floor_dbm(_BW_FHSS),
+        "max_packets":   max_packets,                   # {mod: packets/window} for tau decision
     }
 
 
@@ -88,11 +94,10 @@ def _real_per(state):
 
 def run(elevation_deg, v_rel_kmps, n_nodes, technique1="zero_shot", technique2=None, technique3=None):
     """Build the state then run 3 LLM calls and return results."""
-
     technique2 = technique2 or technique1
     technique3 = technique3 or technique1
     state = build_state(elevation_deg, v_rel_kmps, n_nodes)
-    # Keys expected by SatelliteAgentPipeline.execute.
+    # Keys expected by SatelliteAgentPipeline.execute (class conventions).
     state["relative_velocity_ms"] = float(v_rel_kmps) * 1000.0
     state["rssi_dbm"]             = state["rssi_mean_dbm"]
     state["N"]                    = int(n_nodes)

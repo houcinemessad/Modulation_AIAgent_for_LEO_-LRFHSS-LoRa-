@@ -127,19 +127,56 @@ class Embedder:
         return agent_texts, llm_texts
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self._embeddings.embed_documents(texts)
+        vectors: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            vectors.extend(self._embeddings.embed_documents(texts[i:i + batch_size]))
+            print(f"  embed {min(i + batch_size, len(texts))}/{len(texts)}")
+        return vectors
 
     def embed_query(self, text: str) -> list[float]:
         return self._embeddings.embed_query(text)
 
 # Main/test code: run this file to see how the dataset gets chunked, and to check the distribution of channel states across the chunks.
-
 if __name__ == "__main__":
-    dataset_path = "data/dataset.csv" 
-    dataset = pd.read_csv(dataset_path)
-    for chunk in chunk_dataset(dataset):
-        print("Chunk ID:", chunk["id"])
-        print("Metadata:", chunk["metadata"])
-        print("Agent text for indexing:", agent_text_for_indexing(chunk))
-        print("LLM text for context:", llm_text_for_context(chunk))
-        print("-" * 80)
+    import sys
+    try:
+        from .chunker import chunk_dataset
+    except ImportError:
+        from chunker import chunk_dataset
+
+    dataset_path = sys.argv[1] if len(sys.argv) > 1 else "data/dataset.csv"
+    first_chunk = next(chunk_dataset(dataset_path))
+
+    agent_text = agent_text_for_indexing(first_chunk)
+    llm_text   = llm_text_for_context(first_chunk)
+
+    print("---- agent_text (what the embedder reads) ----")
+    print(agent_text)
+    print(f"  -> {len(agent_text.split())} words / {len(agent_text)} chars")
+    print()
+    print("---- llm_text (what the LLM reads after retrieval) ----")
+    print(llm_text)
+    print(f"  -> {len(llm_text.split())} words / {len(llm_text)} chars")
+    print()
+
+    # Build the runtime state from the chunk we just formatted, so we can
+    # check that agent_text_for_query reproduces agent_text_for_indexing
+    # exactly. The two SNR values are read straight from the chunker's
+    # already-split metadata fields.
+    m = first_chunk["metadata"]
+    sample_state = {
+        "elevation_deg":   m["elevation_deg"],
+        "v_rel_kmps":      m["v_rel_kmps"],
+        "n_nodes":         m["n_nodes"],
+        "distance_km":     m["distance_km"],
+        "kappa":           m["kappa"],
+        "rssi_mean_dbm":   m["rssi_mean_dbm"],
+        "snr_lora_db":     m["snr_lora_mean_db"],
+        "snr_lrfhss_db":   m["snr_lrfhss_mean_db"],
+    }
+    query_text = agent_text_for_query(sample_state)
+    print("---- agent_text_for_query on the same state ----")
+    print(query_text)
+    print()
+    print("Symmetry check (state-derived text vs chunk-derived text):")
+    print(f"  identical = {query_text == agent_text}")

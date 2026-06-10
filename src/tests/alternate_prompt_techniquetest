@@ -1,40 +1,239 @@
-"""alternate_technique.py 
-
-3 étages (géométrie->sévérité, prédiction PER, décision) × 3 stratégies
-(zero_shot, few_shot, cot) = 3^3 = 27 combinaisons. Pour chaque combinaison et
-chaque scénario de test, on mesure :
-  - temps de réponse (latence ms)
-  - PER prédit (LLM) vs PER réel (dataset)  -> MAE sur les 8 modulations
-  - modulation choisie vs oracle (= min PER réel) -> match, regret, gain vs SF12 fixe
-  - sévérité donnée (LLM) vs sévérité de référence (règles déterministes du prompt)
-  - validité de la commande (détection d'hallucination)
-
-"""
 import os
 import sys
 import csv
+import json
 import statistics
 from itertools import product
 
-# Racine du repo sur le path (ce fichier est dans src/tests/, donc DEUX crans au-dessus),
-# sinon "from src.agent import agent" échoue selon le répertoire de lancement.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from src.agent import agent
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+import pandas as pd
+from scipy.stats import pearsonr, spearmanr
 
-# ── Paramètres ───────────────────────────────────────────────────────
+from src.rag.chunker import chunk_dataset
+from src.agent import agent
+from src.agent.pipeline import SatelliteAgentPipeline, best_under_tau
+
+# ── Parameters ───────────────────────────────────────────────────────
 TECHNIQUES = ["zero_shot", "few_shot", "cot"]          # ZS, FS, COT
 MODS = ("sf7", "sf8", "sf9", "sf10", "sf11", "sf12", "dr8", "dr9")
+TAU = 10.0                                             # max PER (%) - goal: max throughput under tau
 
-# Quelques scénarios (élévation, v_rel km/s, n_nodes), un par régime, pour comparer à l'oracle.
-SCENARIOS = [
-    (10,  7.0, 100_000),   # basse élév, dense    -> DR8 attendu
-    (45,  5.0,  50_000),   # mid
-    (60,  2.0,  10_000),   # haute, peu dense     -> LoRa devrait gagner
-    (80,  1.5, 100_000),   # culmination, dense   -> SF longs tués (Doppler-rate)
-]
+FULL_GRID     = False     # False: 3 pure strategies (ZS/FS/COT); True: 27 combinations
+N_TEST        = 50        # number of out-of-sample test scenarios (spec: 50)
+TRAIN_FRAC    = 0.8       # share of states used for RAG index (train)
+SEED          = 0         # split + sampling seed (reproducibility)
+REBUILD_INDEX = True      # True: re-embed train index; False: reuse (if SEED/FRAC unchanged)
 
-DETAILED_CSV = "data/metrics_techniques_detailed.csv"
-SUMMARY_CSV  = "data/metrics_techniques_summary.csv"
+FULL_CSV       = "data/dataset_real.csv"
+TRAIN_CSV      = "data/dataset_train.csv"
+TEST_CSV       = "data/dataset_test.csv"
+EVAL_INDEX_DIR = "data/chroma_eval_train"      # SEPARATE index (does not touch data/chroma)
+DETAILED_CSV   = "data/metrics_techniques_detailed.csv"
+SUMMARY_CSV    = "data/metrics_techniques_summary.csv"
+
+STATE_COLS = ["elevation_deg", "v_rel_kmps", "n_nodes"]
 
 
+# ── Train/Test Split BY STATE (anti-leakage) ───────────────────────────
+def split_train_test():
+    """Split STATES (not rows) into train/test, write the 2 CSVs, return
+    test states. Test is NEVER in the RAG index -> no leakage."""
+    df = pd.read_csv(FULL_CSV)
+    states = (df[STATE_COLS].drop_duplicates()
+              .sample(frac=1.0, random_state=SEED)        # deterministic shuffle
+              .reset_index(drop=True))
+    n_train = int(len(states) * TRAIN_FRAC)
+    train_states, test_states = states.iloc[:n_train], states.iloc[n_train:]
+    df.merge(train_states, on=STATE_COLS).to_csv(TRAIN_CSV, index=False)
+    df.merge(test_states,  on=STATE_COLS).to_csv(TEST_CSV,  index=False)
+    print(f"Split by state: {len(train_states)} train / {len(test_states)} test "
+            f"(out of {len(states)} states)")
+    return test_states
 
+
+def build_eval_pipeline():
+    """Eval pipeline whose RAG index is built on TRAIN only (separate collection)."""
+    pipe = SatelliteAgentPipeline(index_path=EVAL_INDEX_DIR)
+    pipe.store.index_chunks(list(chunk_dataset(TRAIN_CSV)), pipe.embedder,
+                            force_rebuild=REBUILD_INDEX)
+    return pipe
+
+
+# ── Metric Tools ─────────────────────────────────────────────────
+def mod_of(command):
+    """'AT+MOD=LORA-SF7' -> 'sf7' ; 'AT+MOD=LR-FHSS-DR8' -> 'dr8'."""
+    return str(command).split("=")[-1].split("-")[-1].lower()
+
+
+def ref_severity(elev, doppler_khz, rx_dbm):
+    """Reference severity (deterministic oracle) = same rules as prompt."""
+    if elev < 15 or abs(doppler_khz) > 18 or rx_dbm <= -128:
+        return 5
+    if elev >= 60 and abs(doppler_khz) < 6 and rx_dbm >= -120:
+        return 1
+    score = (elev < 30) + (abs(doppler_khz) > 12) + (rx_dbm <= -123)
+    return {0: 2, 1: 3, 2: 4, 3: 4}[score]
+
+
+def per_pairs(per_pred, per_real):
+    """Pairs (predicted, real) over common numeric modulations."""
+    return [(per_pred[k], per_real[k]) for k in per_real
+            if k in per_pred and isinstance(per_pred.get(k), (int, float))]
+
+
+def _mean(vals):
+    vals = [v for v in vals if v is not None]
+    return round(statistics.mean(vals), 2) if vals else None
+
+
+def _corr(pairs, fn):
+    """Correlation (Pearson/Spearman) on (pred, real) pairs. None if degenerate."""
+    xs = [p for p, _ in pairs]
+    ys = [r for _, r in pairs]
+    if len(xs) < 3 or len(set(xs)) < 2 or len(set(ys)) < 2:
+        return None
+    try:
+        return round(float(fn(xs, ys)[0]), 3)
+    except Exception:
+        return None
+
+
+# ── Test Bench ─────────────────────────────────────────────────────
+def main():
+    test_states = split_train_test()
+    pipe = build_eval_pipeline()
+
+    # sample of N_TEST test states (out-of-sample, deterministic)
+    sample = test_states.sample(n=min(N_TEST, len(test_states)), random_state=SEED)
+    scenarios = [(int(r.elevation_deg), float(r.v_rel_kmps), int(r.n_nodes))
+                 for r in sample.itertuples()]
+    combos = (list(product(TECHNIQUES, repeat=3)) if FULL_GRID
+              else [(t, t, t) for t in TECHNIQUES])
+    print(f"{len(combos)} combinaisons × {len(scenarios)} scénarios test = "
+          f"{len(combos) * len(scenarios)} décisions (index = train seul)\n")
+
+    detailed_fields = [
+        "t1", "t2", "t3", "elevation_deg", "v_rel_kmps", "n_nodes", "latency_ms",
+        "severity_llm", "severity_ref", "severity_match",
+        "command", "chosen_mod", "oracle_mod", "rule_mod", "decision_match", "rule_match",
+        "chosen_real_per", "oracle_real_per", "chosen_meets_tau",
+        "throughput_chosen", "throughput_oracle", "throughput_regret",
+        "per_mae", "valid_command", "per_pred", "per_real",
+    ]
+    detailed_rows = []
+    pairs_by_combo = {c: [] for c in combos}
+
+    for combo in combos:
+        t1, t2, t3 = combo
+        for (elev, vrel, nodes) in scenarios:
+            state = agent.build_state(elev, vrel, nodes)
+            state["relative_velocity_ms"] = vrel * 1000.0
+            state["rssi_dbm"] = state["rssi_mean_dbm"]
+            state["N"] = nodes
+            try:
+                result = pipe.execute(state, t1, t2, t3)
+            except Exception as e:
+                print(f"[{t1}/{t2}/{t3}] el={elev} ÉCHEC: {e}")
+                continue
+
+            per_pred = {k: v for k, v in (result.get("per") or {}).items()
+                        if str(k).startswith("per_")}
+            per_real = agent._real_per(state)
+            packets  = state.get("max_packets", {})
+            # ORACLE = true best (REAL PER); RULE = deterministic baseline (same PREDICTED PER as LLM)
+            oracle_mod = best_under_tau(per_real, packets, TAU)
+            rule_mod   = best_under_tau(per_pred, packets, TAU)
+            chosen_mod = mod_of(result.get("selected_command"))
+            valid = chosen_mod in MODS
+            chosen_real = per_real.get(f"per_{chosen_mod}") if valid else None
+            oracle_real = per_real.get(f"per_{oracle_mod}")
+            chosen_meets_tau = int(chosen_real is not None and chosen_real <= TAU)
+            tput_chosen = packets.get(chosen_mod)
+            tput_oracle = packets.get(oracle_mod)
+
+            pairs = per_pairs(per_pred, per_real)
+            pairs_by_combo[combo].extend(pairs)
+            mae = round(sum(abs(a - b) for a, b in pairs) / len(pairs), 2) if pairs else None
+
+            sev_llm = result.get("severity")
+            sev_ref = ref_severity(state["elevation_deg"], state["doppler_hz"] / 1000.0,
+                                   state["rssi_mean_dbm"])
+            row = {
+                "t1": t1, "t2": t2, "t3": t3,
+                "elevation_deg": elev, "v_rel_kmps": vrel, "n_nodes": nodes,
+                "latency_ms": result.get("latency_ms"),
+                "severity_llm": sev_llm, "severity_ref": sev_ref,
+                "severity_match": int(sev_llm == sev_ref) if sev_llm is not None else None,
+                "command": result.get("selected_command"),
+                "chosen_mod": chosen_mod, "oracle_mod": oracle_mod, "rule_mod": rule_mod,
+                "decision_match": int(chosen_mod == oracle_mod),
+                "rule_match": int(rule_mod == oracle_mod),
+                "chosen_real_per": chosen_real, "oracle_real_per": oracle_real,
+                "chosen_meets_tau": chosen_meets_tau,
+                "throughput_chosen": tput_chosen, "throughput_oracle": tput_oracle,
+                "throughput_regret": (tput_oracle - tput_chosen) if (tput_chosen is not None and tput_oracle is not None) else None,
+                "per_mae": mae,
+                "valid_command": int(valid),
+                "per_pred": json.dumps(per_pred),
+                "per_real": json.dumps(per_real),
+            }
+            detailed_rows.append(row)
+            print(f"[{t1[:2]}/{t2[:2]}/{t3[:2]}] el={elev:2d} v={vrel:.1f} n={nodes:>6} "
+                  f"-> {str(result.get('selected_command')):18s} oracle={oracle_mod} "
+                  f"{'OK' if row['decision_match'] else 'x '} MAE={mae} {result.get('latency_ms')}ms")
+
+    # ── detailed write ───────────────────────────────────────────
+    os.makedirs("data", exist_ok=True)
+    with open(DETAILED_CSV, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=detailed_fields)
+        w.writeheader()
+        w.writerows(detailed_rows)
+
+    # ── aggregation + correlation by combination ─────────────────────
+    summary_fields = [
+        "t1", "t2", "t3", "n",
+        "decision_accuracy_pct", "rule_accuracy_pct", "meets_tau_pct", "severity_accuracy_pct",
+        "corr_pearson", "corr_spearman",
+        "mean_latency_ms", "mean_per_mae", "mean_throughput_regret",
+        "pct_choix_lrfhss", "hallucination_pct",
+    ]
+    summary_rows = []
+    for combo in combos:
+        t1, t2, t3 = combo
+        grp = [r for r in detailed_rows if (r["t1"], r["t2"], r["t3"]) == combo]
+        if not grp:
+            continue
+        dm = [r["decision_match"] for r in grp if r["decision_match"] is not None]
+        sm = [r["severity_match"] for r in grp if r["severity_match"] is not None]
+        summary_rows.append({
+            "t1": t1, "t2": t2, "t3": t3, "n": len(grp),
+            "decision_accuracy_pct": round(100 * sum(dm) / len(dm), 1) if dm else None,
+            "rule_accuracy_pct": round(100 * sum(r["rule_match"] for r in grp) / len(grp), 1),
+            "meets_tau_pct": round(100 * sum(r["chosen_meets_tau"] for r in grp) / len(grp), 1),
+            "severity_accuracy_pct": round(100 * sum(sm) / len(sm), 1) if sm else None,
+            "corr_pearson": _corr(pairs_by_combo[combo], pearsonr),
+            "corr_spearman": _corr(pairs_by_combo[combo], spearmanr),
+            "mean_latency_ms": _mean([r["latency_ms"] for r in grp]),
+            "mean_per_mae": _mean([r["per_mae"] for r in grp]),
+            "mean_throughput_regret": _mean([r["throughput_regret"] for r in grp]),
+            "pct_choix_lrfhss": round(100 * sum(r["chosen_mod"].startswith("dr") for r in grp) / len(grp), 1),
+            "hallucination_pct": round(100 * sum(1 - r["valid_command"] for r in grp) / len(grp), 1),
+        })
+    summary_rows.sort(key=lambda r: (-(r["decision_accuracy_pct"] or -1),
+                                     -(r["corr_pearson"] or -1)))
+    with open(SUMMARY_CSV, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=summary_fields)
+        w.writeheader()
+        w.writerows(summary_rows)
+
+    print(f"\nÉcrit :\n  {os.path.abspath(DETAILED_CSV)}\n  {os.path.abspath(SUMMARY_CSV)}")
+    print(f"  split : {os.path.abspath(TRAIN_CSV)} / {os.path.abspath(TEST_CSV)}")
+    if summary_rows:
+        b = summary_rows[0]
+        print(f"Best combo: {b['t1']}/{b['t2']}/{b['t3']} -> "
+              f"décision {b['decision_accuracy_pct']}% | Pearson {b['corr_pearson']} | "
+              f"MAE {b['mean_per_mae']} | hallu {b['hallucination_pct']}% | {b['mean_latency_ms']}ms")
+
+
+if __name__ == "__main__":
+    main()

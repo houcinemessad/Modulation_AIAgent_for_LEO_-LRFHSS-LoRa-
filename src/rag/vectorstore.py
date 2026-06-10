@@ -143,11 +143,37 @@ class VectorStore:
 
 
 if __name__ == "__main__":
-    # Quick test: create the store, index the dataset chunks, and print the count.
-    store = VectorStore()
-    dataset_path = "data/dataset.csv" 
-    dataset = pd.read_csv(dataset_path)
-    chunks = list(chunk_dataset(dataset))
+    import sys
+    try:
+        from .embedder import agent_text_for_query
+    except ImportError:
+        from embedder import agent_text_for_query
+
+    dataset_path = sys.argv[1] if len(sys.argv) > 1 else "data/dataset.csv"
+
     embedder = Embedder()
-    store.index_chunks(chunks, embedder, force_rebuild=True)
-    print(f"Total chunks in store: {store.count()}")
+    store    = VectorStore()
+
+    chunks = list(chunk_dataset(dataset_path))
+    store.index_chunks(chunks, embedder)
+
+    print(f"\nVectorStore contains {store.count()} chunks.")
+
+    first_meta = chunks[0]["metadata"]
+    sample_state = {
+        "elevation_deg":   first_meta["elevation_deg"],
+        "v_rel_kmps":      first_meta["v_rel_kmps"],
+        "n_nodes":         first_meta["n_nodes"],
+        "distance_km":     first_meta["distance_km"],
+        "kappa":           first_meta["kappa"],
+        "rssi_mean_dbm":   first_meta["rssi_mean_dbm"],
+        "snr_lora_db":     first_meta["snr_lora_mean_db"],
+        "snr_lrfhss_db":   first_meta["snr_lrfhss_mean_db"],
+    }
+    query_text   = agent_text_for_query(sample_state)
+    query_vector = embedder.embed_query(query_text)
+
+    hits = store.search(query_vector, k=3)
+    print(f"\nTop-3 hits for the first chunk's own state:")
+    for rank, hit in enumerate(hits, 1):
+        print(f"  {rank}. id={hit['id']:30s}  distance={hit['distance']:.4f}")
