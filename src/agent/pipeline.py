@@ -4,7 +4,7 @@ import time
 from langchain_ollama import ChatOllama
 from src.rag.embedder import Embedder, agent_text_for_query
 from src.rag.vectorstore import VectorStore
-from agent import prompts
+from . import prompts  #corrected
 from pathlib import Path
 
 TAU = 10.0
@@ -39,6 +39,9 @@ def best_under_tau(per, packets=None, tau=TAU):
 
 def _fill(template: str, **values) -> str:
     """Replace the {PLACEHOLDERS} by .replace"""
+    template = template.replace("[INST]", "").replace("[/INST]", "").rstrip()  #corrected
+    if template.endswith("{"):  #corrected
+        template = template[:-1].rstrip()  #corrected
     for key, value in values.items():
         template = template.replace("{" + key + "}", str(value))
     return template
@@ -92,7 +95,9 @@ class SatelliteAgentPipeline:
 
             res1_raw = self.llm.invoke(p1).content
             res1 = self._parse_json_secure(res1_raw)
-            severity = res1.get("severity", 3)
+            severity = res1.get("severity")  #corrected
+            if severity not in (1, 2, 3, 4, 5):  #corrected
+                severity = 5  #corrected
 
             # PROMPT 2
           
@@ -103,7 +108,13 @@ class SatelliteAgentPipeline:
             query_text = agent_text_for_query(state_copie)
             query_vector = self.embedder.embed_query(query_text)
             hits = self.store.search(query_vector, k=3)
-            context_rag = "\n".join([f"SIM {i+1}: {hit['llm_text']}" for i, hit in enumerate(hits)])
+            context_rag = "\n".join(  #corrected
+                f"SIM {i+1}: {hit['llm_text']} | " + ", ".join(  #corrected
+                    f"{m.upper()}_PER:{round(hit['metadata']['per_' + m.upper()])}%"  #corrected
+                    for m in _MODS if hit['metadata'].get('per_' + m.upper()) is not None  #corrected
+                )  #corrected
+                for i, hit in enumerate(hits)  #corrected
+            )  #corrected
 
             if technique2 == "zero_shot":
                 p2 = _fill(prompts.per_prediction_via_embedding_prompt_zeroshot(), SEVERITY=severity, ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr, RAG_CONTEXT=context_rag)
@@ -155,5 +166,5 @@ if __name__ == "__main__":
 
     for tech in ["zero_shot", "few_shot", "cot"]:
         print(f"\n==================== MODE {tech.upper()} ====================")
-        output = pipeline.execute(test_state, technique=tech)
+        output = pipeline.execute(test_state, technique1=tech, technique2=tech, technique3=tech)  #corrected
         print(json.dumps(output, indent=4, ensure_ascii=False))
