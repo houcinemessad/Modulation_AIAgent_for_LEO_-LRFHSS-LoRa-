@@ -22,3 +22,18 @@ matplotlib>=3.7        # literature-comparison figures (validate_against_literat
 
 # ── Tests ───────────────────────────────────────────────────────────
 pytest>=7.4            # tests/test_simulator.py (also runs as a plain script)
+
+# ── Dashboard interactif (étape 6) ──────────────────────────────────
+streamlit>=1.30        # interface dashboard (src/agent/dashboard.py)
+skyfield>=1.45         # propagation TLE réelle SGP4 -> élévation/distance/Doppler (dashboard/dashboard.py)
+# run dashboard with:  python -m streamlit run dashboard/dashboard.py
+
+# =====================================================================
+# NOT pip-installable — install separately:
+#   * Ollama (the local LLM runtime)         -> https://ollama.com/download
+#   * Then pull the models the agent uses:
+#       ollama pull nomic-embed-text         # embeddings (embedder.py)
+#       ollama pull llama3.2:1b              # RAG / retrieval-side reasoning
+#       ollama pull llama3.2:3b              # judge / final decision
+# (langchain-ollama talks to the Ollama server on http://localhost:11434)
+# =====================================================================

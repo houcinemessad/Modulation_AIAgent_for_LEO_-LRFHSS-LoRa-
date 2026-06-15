@@ -1,3 +1,23 @@
+# -*- coding: utf-8 -*-
+"""Benchmark + evaluation rigor (prompt-technique ablation).
+
+Rigor (answering the review):
+  - PER-STATE train/test split (anti-leak): the RAG index is built on TRAIN only;
+    test scenarios are out-of-sample. The eval index lives in a SEPARATE collection
+    (data/chroma_eval_train) so it never touches the production index (data/chroma).
+  - Pearson + Spearman correlation (predicted vs real PER) per combo — the missing
+    requested metric (> 0.95).
+
+Per-decision metrics: latency, predicted vs real PER (MAE), modulation vs oracle,
+LLM severity vs reference, regret, throughput, hallucination.
+
+Outputs (data/):
+  metrics_techniques_detailed*.csv  (1 row per combo x scenario, + per_pred/per_real)
+  metrics_techniques_summary*.csv   (1 row per combo: accuracy, correlations, MAE...)
+  dataset_train.csv / dataset_test.csv  (the split, for reproducibility)
+
+Cost: (combos) x N_TEST decisions x 3 LLM calls. Run on GPU.
+"""
 import os
 import sys
 import csv
@@ -14,30 +34,30 @@ from src.agent import agent
 from src.agent.pipeline import SatelliteAgentPipeline, best_under_tau
 
 # ── Parameters ───────────────────────────────────────────────────────
-TECHNIQUES = ["zero_shot", "few_shot", "cot"]          # ZS, FS, COT
+TECHNIQUES = ["zero_shot", "few_shot", "cot"]
 MODS = ("sf7", "sf8", "sf9", "sf10", "sf11", "sf12", "dr8", "dr9")
-TAU = 10.0                                             # max PER (%) - goal: max throughput under tau
+TAU = 10.0                                             # max PER (%) — objective: max throughput under tau
 
-FULL_GRID     = False     # False: 3 pure strategies (ZS/FS/COT); True: 27 combinations
-N_TEST        = 50        # number of out-of-sample test scenarios (spec: 50)
-TRAIN_FRAC    = 0.8       # share of states used for RAG index (train)
-SEED          = 0         # split + sampling seed (reproducibility)
-REBUILD_INDEX = True      # True: re-embed train index; False: reuse (if SEED/FRAC unchanged)
+FULL_GRID     = True      # False: 3 pure strategies (ZS/FS/COT); True: 27 combos
+N_TEST        = 50        # number of out-of-sample test scenarios
+TRAIN_FRAC    = 0.8       # fraction of states used for the RAG index (train)
+SEED          = 0         # seed for the split + sampling (reproducibility)
+REBUILD_INDEX = True      # True: re-embed the train index; False: reuse (if SEED/FRAC unchanged)
 
 FULL_CSV       = "data/dataset_real.csv"
 TRAIN_CSV      = "data/dataset_train.csv"
 TEST_CSV       = "data/dataset_test.csv"
 EVAL_INDEX_DIR = "data/chroma_eval_train"      # SEPARATE index (does not touch data/chroma)
-DETAILED_CSV   = "data/metrics_techniques_detailed.csv"
-SUMMARY_CSV    = "data/metrics_techniques_summary.csv"
+DETAILED_CSV   = "data/metrics_techniques_detailed8B.csv"
+SUMMARY_CSV    = "data/metrics_techniques_summary8B.csv"
 
 STATE_COLS = ["elevation_deg", "v_rel_kmps", "n_nodes"]
 
 
-# ── Train/Test Split BY STATE (anti-leakage) ───────────────────────────
+# ── Per-state train/test split (anti-leak) ───────────────────────────
 def split_train_test():
-    """Split STATES (not rows) into train/test, write the 2 CSVs, return
-    test states. Test is NEVER in the RAG index -> no leakage."""
+    """Split STATES (not rows) into train/test, write both CSVs, return the test states.
+    The test set is never in the RAG index -> no leakage."""
     df = pd.read_csv(FULL_CSV)
     states = (df[STATE_COLS].drop_duplicates()
               .sample(frac=1.0, random_state=SEED)        # deterministic shuffle
@@ -46,9 +66,32 @@ def split_train_test():
     train_states, test_states = states.iloc[:n_train], states.iloc[n_train:]
     df.merge(train_states, on=STATE_COLS).to_csv(TRAIN_CSV, index=False)
     df.merge(test_states,  on=STATE_COLS).to_csv(TEST_CSV,  index=False)
-    print(f"Split by state: {len(train_states)} train / {len(test_states)} test "
-            f"(out of {len(states)} states)")
+    print(f"State split: {len(train_states)} train / {len(test_states)} test "
+          f"(of {len(states)} states)")
     return test_states
+
+
+def stratified_test_sample(states, n, seed, low_elev_frac=0.2):
+    """Test sample STRATIFIED by density + cap on <15deg states: avoids a degenerate /
+    unbalanced test set. Deterministic (seed)."""
+    densities = sorted(states["n_nodes"].unique())
+    per_d   = max(1, n // len(densities))
+    low_cap = max(1, int(round(per_d * low_elev_frac)))
+    chosen = []
+    for d in densities:
+        grp  = states[states["n_nodes"] == d]
+        low  = grp[grp["elevation_deg"] < 15]
+        high = grp[grp["elevation_deg"] >= 15]
+        n_low  = min(len(low), low_cap)
+        n_high = min(len(high), per_d - n_low)
+        chosen.append(low.sample(n=n_low,  random_state=seed))
+        chosen.append(high.sample(n=n_high, random_state=seed))
+    out = pd.concat(chosen)
+    if len(out) < n:                                    # top up if a stratum is too small
+        rest = states.drop(out.index)
+        if len(rest):
+            out = pd.concat([out, rest.sample(n=min(n - len(out), len(rest)), random_state=seed)])
+    return out.sample(frac=1, random_state=seed).reset_index(drop=True)
 
 
 def build_eval_pipeline():
@@ -59,14 +102,14 @@ def build_eval_pipeline():
     return pipe
 
 
-# ── Metric Tools ─────────────────────────────────────────────────
+# ── Metric helpers ───────────────────────────────────────────────────
 def mod_of(command):
     """'AT+MOD=LORA-SF7' -> 'sf7' ; 'AT+MOD=LR-FHSS-DR8' -> 'dr8'."""
     return str(command).split("=")[-1].split("-")[-1].lower()
 
 
 def ref_severity(elev, doppler_khz, rx_dbm):
-    """Reference severity (deterministic oracle) = same rules as prompt."""
+    """Reference severity (deterministic oracle) = same rules as the prompt."""
     if elev < 15 or abs(doppler_khz) > 18 or rx_dbm <= -128:
         return 5
     if elev >= 60 and abs(doppler_khz) < 6 and rx_dbm >= -120:
@@ -76,7 +119,7 @@ def ref_severity(elev, doppler_khz, rx_dbm):
 
 
 def per_pairs(per_pred, per_real):
-    """Pairs (predicted, real) over common numeric modulations."""
+    """(predicted, real) pairs over the common numeric modulations."""
     return [(per_pred[k], per_real[k]) for k in per_real
             if k in per_pred and isinstance(per_pred.get(k), (int, float))]
 
@@ -87,7 +130,7 @@ def _mean(vals):
 
 
 def _corr(pairs, fn):
-    """Correlation (Pearson/Spearman) on (pred, real) pairs. None if degenerate."""
+    """Correlation (Pearson/Spearman) over (pred, real) pairs. None if degenerate."""
     xs = [p for p, _ in pairs]
     ys = [r for _, r in pairs]
     if len(xs) < 3 or len(set(xs)) < 2 or len(set(ys)) < 2:
@@ -98,19 +141,22 @@ def _corr(pairs, fn):
         return None
 
 
-# ── Test Bench ─────────────────────────────────────────────────────
+# ── Benchmark ────────────────────────────────────────────────────────
 def main():
     test_states = split_train_test()
     pipe = build_eval_pipeline()
 
-    # sample of N_TEST test states (out-of-sample, deterministic)
-    sample = test_states.sample(n=min(N_TEST, len(test_states)), random_state=SEED)
+    # N_TEST test states — STRATIFIED by density + <15deg cap.
+    sample = stratified_test_sample(test_states, min(N_TEST, len(test_states)), SEED)
+    dens_counts = sample["n_nodes"].value_counts().sort_index().to_dict()
+    n_low = int((sample["elevation_deg"] < 15).sum())
+    print(f"Stratified test sample: {len(sample)} states | densities {dens_counts} | <15deg: {n_low}")
     scenarios = [(int(r.elevation_deg), float(r.v_rel_kmps), int(r.n_nodes))
                  for r in sample.itertuples()]
     combos = (list(product(TECHNIQUES, repeat=3)) if FULL_GRID
               else [(t, t, t) for t in TECHNIQUES])
-    print(f"{len(combos)} combinaisons × {len(scenarios)} scénarios test = "
-          f"{len(combos) * len(scenarios)} décisions (index = train seul)\n")
+    print(f"{len(combos)} combos x {len(scenarios)} test scenarios = "
+          f"{len(combos) * len(scenarios)} decisions (index = train only)\n")
 
     detailed_fields = [
         "t1", "t2", "t3", "elevation_deg", "v_rel_kmps", "n_nodes", "latency_ms",
@@ -133,16 +179,16 @@ def main():
             try:
                 result = pipe.execute(state, t1, t2, t3)
             except Exception as e:
-                print(f"[{t1}/{t2}/{t3}] el={elev} ÉCHEC: {e}")
+                print(f"[{t1}/{t2}/{t3}] el={elev} FAILED: {e}")
                 continue
 
             per_pred = {k: v for k, v in (result.get("per") or {}).items()
                         if str(k).startswith("per_")}
             per_real = agent._real_per(state)
             packets  = state.get("max_packets", {})
-            # ORACLE = true best (REAL PER); RULE = deterministic baseline (same PREDICTED PER as LLM)
-            oracle_mod = best_under_tau(per_real, packets, TAU)
-            rule_mod   = best_under_tau(per_pred, packets, TAU)
+            # ORACLE = true best (REAL PER); RULE = deterministic baseline (LLM's PREDICTED PER)
+            oracle_mod = best_under_tau(per_real, packets, TAU, elev)   # hard rule via elev
+            rule_mod   = best_under_tau(per_pred, packets, TAU, elev)
             chosen_mod = mod_of(result.get("selected_command"))
             valid = chosen_mod in MODS
             chosen_real = per_real.get(f"per_{chosen_mod}") if valid else None
@@ -182,14 +228,14 @@ def main():
                   f"-> {str(result.get('selected_command')):18s} oracle={oracle_mod} "
                   f"{'OK' if row['decision_match'] else 'x '} MAE={mae} {result.get('latency_ms')}ms")
 
-    # ── detailed write ───────────────────────────────────────────
+    # ── Write detailed rows ──────────────────────────────────────────
     os.makedirs("data", exist_ok=True)
     with open(DETAILED_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=detailed_fields)
         w.writeheader()
         w.writerows(detailed_rows)
 
-    # ── aggregation + correlation by combination ─────────────────────
+    # ── Aggregate + correlation per combo ────────────────────────────
     summary_fields = [
         "t1", "t2", "t3", "n",
         "decision_accuracy_pct", "rule_accuracy_pct", "meets_tau_pct", "severity_accuracy_pct",
@@ -226,12 +272,12 @@ def main():
         w.writeheader()
         w.writerows(summary_rows)
 
-    print(f"\nÉcrit :\n  {os.path.abspath(DETAILED_CSV)}\n  {os.path.abspath(SUMMARY_CSV)}")
-    print(f"  split : {os.path.abspath(TRAIN_CSV)} / {os.path.abspath(TEST_CSV)}")
+    print(f"\nWrote:\n  {os.path.abspath(DETAILED_CSV)}\n  {os.path.abspath(SUMMARY_CSV)}")
+    print(f"  split: {os.path.abspath(TRAIN_CSV)} / {os.path.abspath(TEST_CSV)}")
     if summary_rows:
         b = summary_rows[0]
         print(f"Best combo: {b['t1']}/{b['t2']}/{b['t3']} -> "
-              f"décision {b['decision_accuracy_pct']}% | Pearson {b['corr_pearson']} | "
+              f"decision {b['decision_accuracy_pct']}% | Pearson {b['corr_pearson']} | "
               f"MAE {b['mean_per_mae']} | hallu {b['hallucination_pct']}% | {b['mean_latency_ms']}ms")
 
 
