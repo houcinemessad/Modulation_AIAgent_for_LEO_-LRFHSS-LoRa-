@@ -155,6 +155,13 @@ def main():
                  for r in sample.itertuples()]
     combos = (list(product(TECHNIQUES, repeat=3)) if FULL_GRID
               else [(t, t, t) for t in TECHNIQUES])
+    # Baselines added next to the LLM combos:
+    #   rule/knn/rule        = fully classical (no LLM)
+    #   rule/{zs,fs,cot}/rule = scoring severity + LLM PER prediction + argmax decision
+    combos += [c for c in [("rule", "knn", "rule"),
+                           ("rule", "zero_shot", "rule"),
+                           ("rule", "few_shot", "rule"),
+                           ("rule", "cot", "rule")] if c not in combos]
     print(f"{len(combos)} combos x {len(scenarios)} test scenarios = "
           f"{len(combos) * len(scenarios)} decisions (index = train only)\n")
 

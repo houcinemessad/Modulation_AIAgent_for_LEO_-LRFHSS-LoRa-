@@ -32,6 +32,7 @@ def best_under_tau(per, packets=None, tau=TAU, elevation_deg=None):
     """
     if elevation_deg is not None and elevation_deg < 15:
         return "dr8"
+    
 
     def per_of(m):
         v = per.get("per_" + m)
@@ -44,6 +45,16 @@ def best_under_tau(per, packets=None, tau=TAU, elevation_deg=None):
         return min(cand, key=_THROUGHPUT_ORDER.index)             # fallback: shortest airtime
     valid = {m: per_of(m) for m in _MODS if per_of(m) is not None}
     return min(valid, key=valid.get) if valid else "dr8"          # nothing under tau -> min PER
+
+
+def rule_severity(elevation_deg, doppler_khz, rx_dbm):
+    """Deterministic channel severity 1-5 (same thresholds as the geometry prompt)."""
+    if elevation_deg < 15 or abs(doppler_khz) > 18 or rx_dbm <= -128:
+        return 5
+    if elevation_deg >= 60 and abs(doppler_khz) < 6 and rx_dbm >= -120:
+        return 1
+    score = (elevation_deg < 30) + (abs(doppler_khz) > 12) + (rx_dbm <= -123)
+    return {0: 2, 1: 3, 2: 4, 3: 4}[score]
 
 
 def _fill(template: str, **values) -> str:
@@ -71,11 +82,23 @@ class SatelliteAgentPipeline:
             raise ValueError("No JSON block found in the response.")
         return json.loads(raw_text[start:end + 1])
 
-    def execute(self, state: dict, technique1: str = "cot",
-                technique2: str = "cot", technique3: str = "cot") -> dict:
+    def _knn_per(self, query_vector, k=3):
+        """Distance-weighted mean of the k nearest neighbours' real PER (deterministic,
+        no LLM). On a grid point the nearest neighbour is exact. Keys are per_<mod>."""
+        hits = self.store.search(query_vector, k=k)
+        per = {}
+        for m in _MODS:
+            weighted = [(h["metadata"]["per_" + m.upper()], 1.0 / (1e-6 + (h.get("distance") or 0.0)))
+                        for h in hits if h["metadata"].get("per_" + m.upper()) is not None]
+            if weighted:
+                per["per_" + m] = round(sum(v * w for v, w in weighted) / sum(w for _, w in weighted), 2)
+        return per
+
+    def execute(self, state: dict, technique1: str = "rule",
+                technique2: str = "cot", technique3: str = "rule") -> dict:
         """Run the 3 stages and return {selected_command, severity, per, latency_ms, technique_used}.
-        technique1/2/3 in {"rule", "zero_shot", "few_shot", "cot"} ('rule' = deterministic,
-        available for stages 1 and 3)."""
+        Stages 1/3 accept "rule" (deterministic); stage 2 accepts "knn" (deterministic kNN);
+        all stages accept "zero_shot"/"few_shot"/"cot" (LLM). Classical agent = rule/knn/rule."""
         start_time = time.time()
 
         elevation = state.get("elevation_deg", 45)
@@ -91,18 +114,20 @@ class SatelliteAgentPipeline:
         nodes = state.get("N", 50000)
 
         try:
-            # STAGE 1 — geometry -> severity (1-5).
-            if technique1 == "zero_shot":
-                p1 = _fill(prompts.geometry_analysis_prompt_zeroshot(), ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr)
-            elif technique1 == "cot":
-                p1 = _fill(prompts.geometry_analysis_prompt_COT(), ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr)
+            # STAGE 1 — geometry -> severity (1-5). 'rule' = deterministic scoring; else LLM.
+            if technique1 == "rule":
+                severity = rule_severity(elevation, v_khz, rx_pwr)
             else:
-                p1 = _fill(prompts.geometry_analysis_prompt_fewshot(), ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr)
-
-            res1 = self._parse_json_secure(self.llm.invoke(p1).content)
-            severity = res1.get("severity")
-            if severity not in (1, 2, 3, 4, 5):
-                severity = 5
+                if technique1 == "zero_shot":
+                    p1 = _fill(prompts.geometry_analysis_prompt_zeroshot(), ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr)
+                elif technique1 == "cot":
+                    p1 = _fill(prompts.geometry_analysis_prompt_COT(), ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr)
+                else:
+                    p1 = _fill(prompts.geometry_analysis_prompt_fewshot(), ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr)
+                res1 = self._parse_json_secure(self.llm.invoke(p1).content)
+                severity = res1.get("severity")
+                if severity not in (1, 2, 3, 4, 5):
+                    severity = 5
 
             # STAGE 2 — RAG retrieval -> PER prediction.
             state_copy = state.copy()
@@ -110,33 +135,37 @@ class SatelliteAgentPipeline:
             state_copy["v_rel_kmps"] = v_ms / 1000.0
 
             query_vector = self.embedder.embed_query(agent_text_for_query(state_copy))
-            # Density-aware context: k nearest, then the nearest at EACH density (SF PER depends
-            # heavily on contention) so the LLM sees the density->PER relation. Each SIM is
-            # tagged (EL, v, N) and carries the neighbour's real PER for interpolation.
-            hits = self.store.search(query_vector, k=3)
-            seen = {h["id"] for h in hits}
-            for d in _DENSITIES:
-                for h in self.store.search(query_vector, k=1, where={"n_nodes": d}):
-                    if h["id"] not in seen:
-                        seen.add(h["id"]); hits.append(h)
-            context_rag = "\n".join(
-                f"SIM {i+1} (EL={h['metadata'].get('elevation_deg')}deg, "
-                f"v={h['metadata'].get('v_rel_kmps')}km/s, N={h['metadata'].get('n_nodes')}): "
-                f"{h['llm_text']} | " + ", ".join(
-                    f"{m.upper()}_PER:{round(h['metadata']['per_' + m.upper()])}%"
-                    for m in _MODS if h['metadata'].get('per_' + m.upper()) is not None
-                )
-                for i, h in enumerate(hits)
-            )
 
-            if technique2 == "zero_shot":
-                p2 = _fill(prompts.per_prediction_via_embedding_prompt_zeroshot(), SEVERITY=severity, ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr, RAG_CONTEXT=context_rag)
-            elif technique2 == "cot":
-                p2 = _fill(prompts.per_prediction_via_embedding_prompt_COT(), SEVERITY=severity, ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr, RAG_CONTEXT=context_rag)
+            if technique2 == "knn":
+                # Deterministic kNN: distance-weighted mean of the k nearest neighbours' PER.
+                predicted_per = self._knn_per(query_vector, k=3)
             else:
-                p2 = _fill(prompts.per_prediction_via_embedding_prompt_fewshot(), SEVERITY=severity, ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr, RAG_CONTEXT=context_rag)
+                # Density-aware context: k nearest, then the nearest at EACH density (SF PER
+                # depends heavily on contention) so the LLM sees the density->PER relation.
+                # Each SIM is tagged (EL, v, N) and carries the neighbour's real PER.
+                hits = self.store.search(query_vector, k=3)
+                seen = {h["id"] for h in hits}
+                for d in _DENSITIES:
+                    for h in self.store.search(query_vector, k=1, where={"n_nodes": d}):
+                        if h["id"] not in seen:
+                            seen.add(h["id"]); hits.append(h)
+                context_rag = "\n".join(
+                    f"SIM {i+1} (EL={h['metadata'].get('elevation_deg')}deg, "
+                    f"v={h['metadata'].get('v_rel_kmps')}km/s, N={h['metadata'].get('n_nodes')}): "
+                    f"{h['llm_text']} | " + ", ".join(
+                        f"{m.upper()}_PER:{round(h['metadata']['per_' + m.upper()])}%"
+                        for m in _MODS if h['metadata'].get('per_' + m.upper()) is not None
+                    )
+                    for i, h in enumerate(hits)
+                )
+                if technique2 == "zero_shot":
+                    p2 = _fill(prompts.per_prediction_via_embedding_prompt_zeroshot(), SEVERITY=severity, ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr, RAG_CONTEXT=context_rag)
+                elif technique2 == "cot":
+                    p2 = _fill(prompts.per_prediction_via_embedding_prompt_COT(), SEVERITY=severity, ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr, RAG_CONTEXT=context_rag)
+                else:
+                    p2 = _fill(prompts.per_prediction_via_embedding_prompt_fewshot(), SEVERITY=severity, ELEVATION=elevation, DOPPLER=v_khz, RX_POWER=rx_pwr, RAG_CONTEXT=context_rag)
+                predicted_per = self._parse_json_secure(self.llm.invoke(p2).content)
 
-            predicted_per = self._parse_json_secure(self.llm.invoke(p2).content)
             predicted_per_json = json.dumps(predicted_per)
             packets_json = json.dumps(state.get("max_packets", {}))
 

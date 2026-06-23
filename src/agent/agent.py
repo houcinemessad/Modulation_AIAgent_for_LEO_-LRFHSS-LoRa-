@@ -113,13 +113,17 @@ def _real_per(state):
 
 
 def run(elevation_deg, v_rel_kmps, n_nodes,
-        technique1="cot", technique2=None, technique3=None):
+        technique1="rule", technique2="cot", technique3="rule"):
     """(elevation, v_rel, n_nodes) -> {state, command, severity, per, real_per, latency_ms, technique}.
-    technique1/2/3 in {"rule", "zero_shot", "few_shot", "cot"} = strategy for each of the 3
-    stages (geometry->severity, PER prediction, decision). One value applies to all stages.
-    Assumes startup() has run (chunks indexed) and Ollama is up."""
-    technique2 = technique2 or technique1
-    technique3 = technique3 or technique1
+    Stages 1/3 accept "rule" (deterministic); stage 2 accepts "knn"; all accept "zero_shot"/
+    "few_shot"/"cot" (LLM). No technique given -> classical agent rule/knn/rule (deterministic,
+    ~80 ms). A single technique applies to all 3 stages. Assumes startup() ran and Ollama is up."""
+    if technique1 is None and technique2 is None and technique3 is None:
+        technique1, technique2, technique3 = "rule", "knn", "rule"     # classical default
+    else:
+        technique1 = technique1 or "cot"
+        technique2 = technique2 or technique1
+        technique3 = technique3 or technique1
     state = build_state(elevation_deg, v_rel_kmps, n_nodes)
     # Keys expected by SatelliteAgentPipeline.execute.
     state["relative_velocity_ms"] = float(v_rel_kmps) * 1000.0
